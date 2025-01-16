@@ -8,9 +8,10 @@ from langchain.chat_models import ChatOpenAI
 from langchain.schema.runnable import RunnableLambda, RunnablePassthrough
 from langchain.memory import ConversationBufferMemory
 from langchain.callbacks.base import BaseCallbackHandler
-import openai
+from operator import itemgetter
 import streamlit as st
 import os
+
 
 st.set_page_config(
     page_title="Streamlit is 🔥",
@@ -51,7 +52,7 @@ def embed_file(file):
 
     cache_basic_path = f"./.cache/embeddings/{file.name}"
     cache_directory = os.path.dirname(cache_basic_path)
-    cache_path = LocalFileStore(f"./.cache/embeddings/{file.name}")
+    cache_path = LocalFileStore(cache_basic_path)
 
     if not os.path.exists(cache_directory):
         os.makedirs(cache_directory, exist_ok=True)
@@ -97,6 +98,22 @@ def format_docs(docs):
     return "\n\n".join(document.page_content for document in docs)
 
 
+def load_memory(_):
+    return st.session_state["memory"].load_memory_variables({})["history"]
+
+
+def get_history():
+    return st.session_state["memory"].load_memory_variables({})
+
+
+def invoke_chain(question):
+    result = chain.invoke(question)
+    st.session_state["memory"].save_context(
+        {"input": question},
+        {"output": result.content},
+    )
+
+
 prompt = ChatPromptTemplate.from_messages(
     [
         (
@@ -111,23 +128,6 @@ prompt = ChatPromptTemplate.from_messages(
         ("human", "{question}"),
     ]
 )
-
-
-def load_memory(_):
-    return memory.load_memory_variables({})["history"]
-
-
-def get_history():
-    return memory.load_memory_variables({})
-
-
-def invoke_chain(question):
-    result = chain.invoke(question)
-    memory.save_context(
-        {"input": question},
-        {"output": result.content},
-    )
-    print(result.content)
 
 
 st.title("Streamlit DOC-GPT")
@@ -166,31 +166,36 @@ if openai_api_key:
         callbacks=[ChatCallbackHandler()],
     )
 
-    memory = ConversationBufferMemory(
-        llm=llm,
-        max_token_limit=120,
-        return_messages=True,
-    )
-
-
-if file:
-    retriever = embed_file(file)
-    send_message("I'm ready! Ask away!", "ai", save=False)
-    paint_history()
-    message = st.chat_input("Ask anything about your file...")
-    if message:
-        send_message(message, "human")
-        chain = (
-            {
-                "context": retriever | RunnableLambda(format_docs),
-                "question": RunnablePassthrough(),
-                "history": load_memory,
-            }
-            | prompt
-            | llm
-        )
-        with st.chat_message("ai"):
-            invoke_chain(message)
-            print(get_history())
-else:
-    st.session_state["messages"] = []
+    if file:
+        retriever = embed_file(file)
+        send_message("I'm ready! Ask away!", "ai", save=False)
+        paint_history()
+        message = st.chat_input("Ask anything about your file...")
+        if message:
+            send_message(message, "human")
+            chain = (
+                {
+                    "context": retriever | RunnableLambda(format_docs),
+                    "question": RunnablePassthrough(),
+                }
+                | RunnablePassthrough.assign(
+                    history=RunnableLambda(
+                        st.session_state["memory"].load_memory_variables
+                    )
+                    | itemgetter("history")
+                )
+                | prompt
+                | llm
+            )
+            with st.chat_message("ai"):
+                invoke_chain(message)
+                print(get_history())
+    else:
+        if "messages" not in st.session_state:
+            st.session_state["messages"] = []
+        if "memory" not in st.session_state:
+            st.session_state["memory"] = ConversationBufferMemory(
+                llm=llm,
+                max_token_limit=2000,
+                return_messages=True,
+            )
